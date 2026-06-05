@@ -4,11 +4,13 @@ import android.annotation.SuppressLint;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
 import android.webkit.*;
@@ -18,58 +20,59 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 
 public class MainActivity extends AppCompatActivity {
-
-    private static final String APP_URL = "http://186.246.46.119/app/";
-    private static final String PREFS   = "nexus_prefs";
+    private static final String TAG    = "NexusMain";
+    private static final String URL    = "http://186.246.46.119/app/";
+    private static final String PREFS  = "nexus_prefs";
 
     private WebView webView;
     private ProgressBar progressBar;
     private ActivityResultLauncher<String> permLauncher;
-    private boolean sseStarted = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        Log.d(TAG, "onCreate");
 
         webView     = findViewById(R.id.webview);
         progressBar = findViewById(R.id.progress_bar);
 
         // Канал уведомлений
         NotificationChannel ch = new NotificationChannel(
-            "nexus_messages", "Сообщения NEXUS",
-            NotificationManager.IMPORTANCE_HIGH);
+            "nexus_messages", "Сообщения NEXUS", NotificationManager.IMPORTANCE_HIGH);
         ch.enableVibration(true);
-        ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
-            .createNotificationChannel(ch);
+        ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(ch);
 
-        // Регистрируем запрос разрешения ДО onStart
         permLauncher = registerForActivityResult(
             new ActivityResultContracts.RequestPermission(),
             granted -> {
-                // После ответа пользователя запускаем SSE если токен уже есть
-                String tok = getSharedPreferences(PREFS, MODE_PRIVATE)
-                    .getString("token", null);
-                if (tok != null) launchSse();
+                Log.d(TAG, "Permission result: " + granted);
+                startSse();
             }
         );
 
         setupWebView(savedInstanceState);
 
-        // Запрашиваем разрешение на уведомления сразу при запуске (через 1 сек)
+        // Запрашиваем разрешение через 1 сек после старта
         webView.postDelayed(() -> {
+            Log.d(TAG, "Requesting notification permission");
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                if (checkSelfPermission("android.permission.POST_NOTIFICATIONS")
-                        != PackageManager.PERMISSION_GRANTED) {
-                    permLauncher.launch("android.permission.POST_NOTIFICATIONS");
+                if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                        == PackageManager.PERMISSION_GRANTED) {
+                    Log.d(TAG, "Permission already granted");
+                    startSse();
+                } else {
+                    permLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS);
                 }
+            } else {
+                startSse();
             }
         }, 1000);
     }
 
-    private void launchSse() {
-        if (sseStarted) return;
-        sseStarted = true;
+    private void startSse() {
+        String token = getSharedPreferences(PREFS, MODE_PRIVATE).getString("token", null);
+        Log.d(TAG, "startSse token=" + (token != null ? "present(len="+token.length()+")" : "null"));
         try {
             Intent i = new Intent(this, SseService.class);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -77,8 +80,9 @@ public class MainActivity extends AppCompatActivity {
             } else {
                 startService(i);
             }
+            Log.d(TAG, "SseService started");
         } catch (Exception e) {
-            sseStarted = false;
+            Log.e(TAG, "Failed to start SseService: " + e);
         }
     }
 
@@ -94,34 +98,33 @@ public class MainActivity extends AppCompatActivity {
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
             public void setToken(String token) {
+                Log.d(TAG, "setToken called, len=" + (token != null ? token.length() : 0));
                 if (token == null || token.isEmpty()) return;
                 getSharedPreferences(PREFS, MODE_PRIVATE)
                     .edit().putString("token", token).apply();
-                runOnUiThread(() -> launchSse());
+                // Перезапускаем сервис с новым токеном
+                runOnUiThread(() -> startSse());
             }
         }, "AndroidBridge");
 
         webView.setWebViewClient(new WebViewClient() {
-            @Override
-            public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {
+            @Override public void onPageStarted(WebView v, String u, android.graphics.Bitmap f) {
                 progressBar.setVisibility(View.VISIBLE);
             }
-            @Override
-            public void onPageFinished(WebView v, String url) {
+            @Override public void onPageFinished(WebView v, String u) {
                 progressBar.setVisibility(View.GONE);
-                // Читаем токен из localStorage
+                Log.d(TAG, "Page loaded: " + u);
                 v.evaluateJavascript(
                     "(function(){" +
                     "var t=localStorage.getItem(\"token\");" +
                     "if(t&&t!==\"null\"&&t!==\"undefined\")AndroidBridge.setToken(t);" +
-                    "})()", null);
+                    "return t;" +
+                    "})()", val -> Log.d(TAG, "localStorage token: " + val));
             }
-            @Override
-            public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
+            @Override public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
                 h.proceed();
             }
-            @Override
-            public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+            @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
                 String url = r.getUrl().toString();
                 if (url.startsWith("http://186.246.46.119")) return false;
                 startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
@@ -130,35 +133,25 @@ public class MainActivity extends AppCompatActivity {
         });
 
         webView.setWebChromeClient(new WebChromeClient() {
-            @Override
-            public void onProgressChanged(WebView v, int p) {
+            @Override public void onProgressChanged(WebView v, int p) {
                 progressBar.setProgress(p);
                 if (p == 100) progressBar.setVisibility(View.GONE);
             }
         });
 
         if (savedState != null) webView.restoreState(savedState);
-        else webView.loadUrl(APP_URL);
+        else webView.loadUrl(URL);
     }
 
-    @Override
-    protected void onSaveInstanceState(Bundle out) {
+    @Override protected void onSaveInstanceState(Bundle out) {
         super.onSaveInstanceState(out);
         webView.saveState(out);
     }
-
-    @Override
-    public boolean onKeyDown(int k, KeyEvent e) {
-        if (k == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
-            webView.goBack(); return true;
-        }
+    @Override public boolean onKeyDown(int k, KeyEvent e) {
+        if (k == KeyEvent.KEYCODE_BACK && webView.canGoBack()) { webView.goBack(); return true; }
         return super.onKeyDown(k, e);
     }
-
     @Override protected void onResume()  { super.onResume();  webView.onResume(); }
     @Override protected void onPause()   { super.onPause();   webView.onPause(); }
-    @Override protected void onDestroy() {
-        if (webView != null) webView.destroy();
-        super.onDestroy();
-    }
+    @Override protected void onDestroy() { if (webView != null) webView.destroy(); super.onDestroy(); }
 }
