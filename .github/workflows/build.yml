@@ -25,20 +25,20 @@ jobs:
         unzip -q /tmp/gradle.zip -d /opt
         echo "/opt/gradle-8.4/bin" >> $GITHUB_PATH
 
-    - name: Cache Gradle
-      uses: actions/cache@v4
-      with:
-        path: ~/.gradle/caches
-        key: gradle-8.4-${{ hashFiles('**/*.gradle*') }}
-
-    - name: Build Release APK
-      run: gradle assembleRelease
+    - name: Build Debug APK (signed with debug key)
+      run: gradle assembleDebug
       env:
         ANDROID_HOME: /usr/local/lib/android/sdk
+
+    - name: Rename APK
+      run: |
+        mkdir -p output
+        cp app/build/outputs/apk/debug/app-debug.apk output/NEXUS.apk
+        ls -lh output/
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: nexus-release-apk
-        path: app/build/outputs/apk/release/app-release*.apk
+        name: NEXUS-android
+        path: output/NEXUS.apk
         retention-days: 30
