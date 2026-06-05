@@ -23,8 +23,8 @@ public class NotificationWorker extends Worker {
     private static final String API_URL    = "http://186.246.46.119/api/chats?limit=100";
     private static final String PREFS      = "nexus_prefs";
 
-    public NotificationWorker(@NonNull Context ctx, @NonNull WorkerParameters params) {
-        super(ctx, params);
+    public NotificationWorker(@NonNull Context ctx, @NonNull WorkerParameters p) {
+        super(ctx, p);
     }
 
     @NonNull
@@ -33,6 +33,14 @@ public class NotificationWorker extends Worker {
         Context ctx = getApplicationContext();
         SharedPreferences prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         String token = prefs.getString("token", null);
+
+        // Первый запуск WorkManager — показываем тестовое уведомление чтобы убедиться что всё работает
+        boolean firstRun = prefs.getBoolean("worker_first_run", true);
+        if (firstRun) {
+            prefs.edit().putBoolean("worker_first_run", false).apply();
+            showNotification(ctx, 0, "NEXUS работает", "Уведомления о новых сообщениях включены");
+        }
+
         if (token == null || token.isEmpty()) return Result.success();
 
         try {
@@ -62,13 +70,15 @@ public class NotificationWorker extends Worker {
                     newTotal += u;
                     if (sender.isEmpty())
                         sender = ch.optString("contact_name",
-                                 ch.optString("name", ""));
+                                 ch.optString("name", "Новое сообщение"));
                 }
             }
 
-            if (newTotal > prevTotal) {
-                createChannel(ctx);
-                showNotification(ctx, newTotal, sender);
+            if (newTotal > prevTotal && newTotal > 0) {
+                String title = newTotal == 1
+                    ? "Новое сообщение"
+                    : "Новых сообщений: " + newTotal;
+                showNotification(ctx, 1001, title, sender.isEmpty() ? "Откройте NEXUS" : sender);
             }
 
             prefs.edit().putInt("last_unread", newTotal).apply();
@@ -79,32 +89,27 @@ public class NotificationWorker extends Worker {
         return Result.success();
     }
 
-    private void createChannel(Context ctx) {
+    private void showNotification(Context ctx, int id, String title, String text) {
+        // Создаём канал на случай если его нет
         NotificationChannel ch = new NotificationChannel(
             CHANNEL_ID, "Сообщения NEXUS", NotificationManager.IMPORTANCE_HIGH);
         ch.enableVibration(true);
-        ((NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE))
-            .createNotificationChannel(ch);
-    }
+        NotificationManager nm = (NotificationManager)
+            ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+        nm.createNotificationChannel(ch);
 
-    private void showNotification(Context ctx, int count, String sender) {
         Intent intent = new Intent(ctx, MainActivity.class);
         intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        PendingIntent pi = PendingIntent.getActivity(ctx, 0, intent,
+        PendingIntent pi = PendingIntent.getActivity(ctx, id, intent,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        String title = count == 1 ? "Новое сообщение" : "Новых сообщений: " + count;
-        String body  = sender.isEmpty() ? "Откройте NEXUS" : sender;
-
-        NotificationCompat.Builder b = new NotificationCompat.Builder(ctx, CHANNEL_ID)
+        nm.notify(id, new NotificationCompat.Builder(ctx, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_email)
             .setContentTitle(title)
-            .setContentText(body)
+            .setContentText(text)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
-            .setContentIntent(pi);
-
-        ((NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE))
-            .notify(1001, b.build());
+            .setContentIntent(pi)
+            .build());
     }
 }
