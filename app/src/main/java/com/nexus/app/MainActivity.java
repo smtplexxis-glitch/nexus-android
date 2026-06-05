@@ -1,13 +1,11 @@
 package com.nexus.app;
 
 import android.annotation.SuppressLint;
-import android.app.AlertDialog;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.content.Intent;
 import android.net.Uri;
 import android.net.http.SslError;
-import android.os.Build;
 import android.os.Bundle;
 import android.view.KeyEvent;
 import android.view.View;
@@ -16,17 +14,15 @@ import android.widget.ProgressBar;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.work.*;
-import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends AppCompatActivity {
-    private static final String APP_URL  = "http://186.246.46.119/app/";
-    private static final String PREFS    = "nexus_prefs";
-    private static final String WORK_TAG = "nexus_notif";
+
+    private static final String APP_URL = "http://186.246.46.119/app/";
+    private static final String PREFS   = "nexus_prefs";
 
     private WebView webView;
     private ProgressBar progressBar;
-    private ActivityResultLauncher<String> notifLauncher;
+    private ActivityResultLauncher<String> permLauncher;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -36,85 +32,58 @@ public class MainActivity extends AppCompatActivity {
         webView     = findViewById(R.id.webview);
         progressBar = findViewById(R.id.progress_bar);
 
-        createNotificationChannel();
+        // Создаём канал уведомлений
+        NotificationChannel ch = new NotificationChannel(
+            "nexus_messages", "Сообщения NEXUS",
+            NotificationManager.IMPORTANCE_HIGH);
+        ch.enableVibration(true);
+        getSystemService(NotificationManager.class).createNotificationChannel(ch);
 
-        notifLauncher = registerForActivityResult(
+        // Регистрируем запрос разрешения
+        permLauncher = registerForActivityResult(
             new ActivityResultContracts.RequestPermission(),
-            granted -> { if (granted) startServices(); }
+            granted -> { if (granted) launchSseService(); }
         );
 
         setupWebView(savedInstanceState);
-
-        webView.postDelayed(this::requestNotifPermission, 2000);
     }
 
-    private void requestNotifPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
-                    == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                startServices();
-            } else if (shouldShowRequestPermissionRationale(android.Manifest.permission.POST_NOTIFICATIONS)) {
-                new AlertDialog.Builder(this)
-                    .setTitle("Уведомления NEXUS")
-                    .setMessage("Разрешите уведомления чтобы получать сообщения от клиентов мгновенно.")
-                    .setPositiveButton("Разрешить", (d, w) ->
-                        notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS))
-                    .setNegativeButton("Не сейчас", null).show();
+    private void launchSseService() {
+        try {
+            Intent i = new Intent(this, SseService.class);
+            startForegroundService(i);
+        } catch (Exception ignored) {}
+    }
+
+    // Вызывается после того как страница загрузилась и токен извлечён
+    private void onTokenReady() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            int granted = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS);
+            if (granted == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                launchSseService();
             } else {
-                notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS);
+                permLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS);
             }
         } else {
-            startServices();
+            launchSseService();
         }
-    }
-
-    private void startServices() {
-        // SSE Foreground Service
-        Intent sseIntent = new Intent(this, SseService.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(sseIntent);
-        } else {
-            startService(sseIntent);
-        }
-        // WorkManager backup
-        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
-            WORK_TAG, ExistingPeriodicWorkPolicy.KEEP,
-            new PeriodicWorkRequest.Builder(NotificationWorker.class, 15, TimeUnit.MINUTES)
-                .setConstraints(new Constraints.Builder()
-                    .setRequiredNetworkType(NetworkType.CONNECTED).build())
-                .addTag(WORK_TAG).build());
-    }
-
-    private void createNotificationChannel() {
-        NotificationChannel ch = new NotificationChannel(
-            "nexus_messages", "Сообщения NEXUS", NotificationManager.IMPORTANCE_HIGH);
-        ch.enableVibration(true);
-        getSystemService(NotificationManager.class).createNotificationChannel(ch);
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     private void setupWebView(Bundle savedState) {
-        WebSettings s = webView.getSettings();
-        s.setJavaScriptEnabled(true);
-        s.setDomStorageEnabled(true);
-        s.setDatabaseEnabled(true);
-        s.setCacheMode(WebSettings.LOAD_DEFAULT);
-        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        s.setUserAgentString(s.getUserAgentString() + " NexusApp/1.0");
+        WebSettings ws = webView.getSettings();
+        ws.setJavaScriptEnabled(true);
+        ws.setDomStorageEnabled(true);
+        ws.setDatabaseEnabled(true);
+        ws.setCacheMode(WebSettings.LOAD_DEFAULT);
+        ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
 
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
             public void setToken(String token) {
                 getSharedPreferences(PREFS, MODE_PRIVATE)
                     .edit().putString("token", token).apply();
-                startService(new Intent(MainActivity.this, SseService.class));
-            }
-            @JavascriptInterface
-            public void clearToken() {
-                getSharedPreferences(PREFS, MODE_PRIVATE)
-                    .edit().remove("token").remove("last_unread").apply();
-                stopService(new Intent(MainActivity.this, SseService.class));
-                WorkManager.getInstance(MainActivity.this).cancelAllWorkByTag(WORK_TAG);
+                runOnUiThread(() -> onTokenReady());
             }
         }, "AndroidBridge");
 
@@ -126,9 +95,12 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageFinished(WebView v, String url) {
                 progressBar.setVisibility(View.GONE);
+                // Извлекаем токен из localStorage
                 v.evaluateJavascript(
-                    "(function(){var t=localStorage.getItem('token');" +
-                    "if(t&&t!='null')AndroidBridge.setToken(t);})()", null);
+                    "(function(){" +
+                    "  var t=localStorage.getItem('token');" +
+                    "  if(t && t!='null') AndroidBridge.setToken(t);" +
+                    "})()", null);
             }
             @Override
             public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
