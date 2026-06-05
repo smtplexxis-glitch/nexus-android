@@ -16,7 +16,6 @@ import android.widget.ProgressBar;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 import androidx.work.*;
 import java.util.concurrent.TimeUnit;
 
@@ -27,7 +26,6 @@ public class MainActivity extends AppCompatActivity {
 
     private WebView webView;
     private ProgressBar progressBar;
-    private SwipeRefreshLayout swipeRefreshLayout;
     private ActivityResultLauncher<String> notifLauncher;
 
     @Override
@@ -35,9 +33,8 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        webView            = findViewById(R.id.webview);
-        progressBar        = findViewById(R.id.progress_bar);
-        swipeRefreshLayout = findViewById(R.id.swipe_refresh);
+        webView     = findViewById(R.id.webview);
+        progressBar = findViewById(R.id.progress_bar);
 
         createNotificationChannel();
 
@@ -48,8 +45,7 @@ public class MainActivity extends AppCompatActivity {
 
         setupWebView(savedInstanceState);
 
-        // Запрашиваем разрешение через 1.5 сек
-        webView.postDelayed(this::requestNotifPermission, 1500);
+        webView.postDelayed(this::requestNotifPermission, 2000);
     }
 
     private void requestNotifPermission() {
@@ -61,7 +57,8 @@ public class MainActivity extends AppCompatActivity {
                 new AlertDialog.Builder(this)
                     .setTitle("Уведомления NEXUS")
                     .setMessage("Разрешите уведомления чтобы получать сообщения от клиентов мгновенно.")
-                    .setPositiveButton("Разрешить", (d, w) -> notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS))
+                    .setPositiveButton("Разрешить", (d, w) ->
+                        notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS))
                     .setNegativeButton("Не сейчас", null).show();
             } else {
                 notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS);
@@ -72,18 +69,19 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startServices() {
-        // 1. SSE Foreground Service — мгновенные уведомления
+        // SSE Foreground Service
         Intent sseIntent = new Intent(this, SseService.class);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(sseIntent);
         } else {
             startService(sseIntent);
         }
-        // 2. WorkManager — резервный опрос каждые 15 мин
+        // WorkManager backup
         WorkManager.getInstance(this).enqueueUniquePeriodicWork(
             WORK_TAG, ExistingPeriodicWorkPolicy.KEEP,
             new PeriodicWorkRequest.Builder(NotificationWorker.class, 15, TimeUnit.MINUTES)
-                .setConstraints(new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                .setConstraints(new Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .addTag(WORK_TAG).build());
     }
 
@@ -107,47 +105,75 @@ public class MainActivity extends AppCompatActivity {
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
             public void setToken(String token) {
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("token", token).apply();
-                // Перезапускаем SSE сервис с новым токеном
+                getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .edit().putString("token", token).apply();
                 startService(new Intent(MainActivity.this, SseService.class));
             }
             @JavascriptInterface
             public void clearToken() {
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("token").remove("last_unread").apply();
+                getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .edit().remove("token").remove("last_unread").apply();
                 stopService(new Intent(MainActivity.this, SseService.class));
                 WorkManager.getInstance(MainActivity.this).cancelAllWorkByTag(WORK_TAG);
             }
         }, "AndroidBridge");
 
         webView.setWebViewClient(new WebViewClient() {
-            @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) { progressBar.setVisibility(View.VISIBLE); }
-            @Override public void onPageFinished(WebView v, String url) {
-                progressBar.setVisibility(View.GONE);
-                swipeRefreshLayout.setRefreshing(false);
-                v.evaluateJavascript("(function(){var t=localStorage.getItem('token');if(t&&t!='null')AndroidBridge.setToken(t);})()", null);
+            @Override
+            public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {
+                progressBar.setVisibility(View.VISIBLE);
             }
-            @Override public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) { h.proceed(); }
-            @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+            @Override
+            public void onPageFinished(WebView v, String url) {
+                progressBar.setVisibility(View.GONE);
+                v.evaluateJavascript(
+                    "(function(){var t=localStorage.getItem('token');" +
+                    "if(t&&t!='null')AndroidBridge.setToken(t);})()", null);
+            }
+            @Override
+            public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
+                h.proceed();
+            }
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
                 String url = r.getUrl().toString();
                 if (url.startsWith("http://186.246.46.119")) return false;
-                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); return true;
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                return true;
             }
         });
+
         webView.setWebChromeClient(new WebChromeClient() {
-            @Override public void onProgressChanged(WebView v, int p) {
-                progressBar.setProgress(p); if (p == 100) progressBar.setVisibility(View.GONE);
+            @Override
+            public void onProgressChanged(WebView v, int p) {
+                progressBar.setProgress(p);
+                if (p == 100) progressBar.setVisibility(View.GONE);
             }
         });
-        swipeRefreshLayout.setOnRefreshListener(() -> webView.reload());
-        if (savedState != null) webView.restoreState(savedState); else webView.loadUrl(APP_URL);
+
+        if (savedState != null) webView.restoreState(savedState);
+        else webView.loadUrl(APP_URL);
     }
 
-    @Override protected void onSaveInstanceState(Bundle out) { super.onSaveInstanceState(out); webView.saveState(out); }
-    @Override public boolean onKeyDown(int k, KeyEvent e) {
-        if (k == KeyEvent.KEYCODE_BACK && webView.canGoBack()) { webView.goBack(); return true; }
+    @Override
+    protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        webView.saveState(out);
+    }
+
+    @Override
+    public boolean onKeyDown(int k, KeyEvent e) {
+        if (k == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
+            webView.goBack();
+            return true;
+        }
         return super.onKeyDown(k, e);
     }
+
     @Override protected void onResume()  { super.onResume();  webView.onResume(); }
     @Override protected void onPause()   { super.onPause();   webView.onPause(); }
-    @Override protected void onDestroy() { if (webView != null) webView.destroy(); super.onDestroy(); }
+    @Override protected void onDestroy() {
+        if (webView != null) webView.destroy();
+        super.onDestroy();
+    }
 }
