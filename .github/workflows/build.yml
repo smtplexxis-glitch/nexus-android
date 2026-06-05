@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
+    - name: Checkout
       uses: actions/checkout@v4
 
     - name: Set up JDK 17
@@ -21,19 +21,27 @@ jobs:
 
     - name: Install Gradle 8.4
       run: |
-        wget -q https://services.gradle.org/distributions/gradle-8.4-bin.zip -O /tmp/gradle.zip
-        unzip -q /tmp/gradle.zip -d /opt
+        wget -q https://services.gradle.org/distributions/gradle-8.4-bin.zip -O /tmp/g.zip
+        unzip -q /tmp/g.zip -d /opt
         echo "/opt/gradle-8.4/bin" >> $GITHUB_PATH
 
-    - name: Build Debug APK (signed with debug key)
-      run: gradle assembleDebug
+    - name: Decode keystore
+      run: |
+        echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/nexus.keystore
+
+    - name: Build release APK
+      run: gradle assembleRelease
       env:
-        ANDROID_HOME: /usr/local/lib/android/sdk
+        ANDROID_HOME:   /usr/local/lib/android/sdk
+        KEYSTORE_PATH:  nexus.keystore
+        STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+        KEY_ALIAS:      ${{ secrets.KEY_ALIAS }}
+        KEY_PASSWORD:   ${{ secrets.KEY_PASSWORD }}
 
     - name: Rename APK
       run: |
         mkdir -p output
-        cp app/build/outputs/apk/debug/app-debug.apk output/NEXUS.apk
+        cp app/build/outputs/apk/release/app-release.apk output/NEXUS.apk
         ls -lh output/
 
     - name: Upload APK
