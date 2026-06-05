@@ -21,7 +21,6 @@ import androidx.work.*;
 import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends AppCompatActivity {
-
     private static final String APP_URL  = "http://186.246.46.119/app/";
     private static final String PREFS    = "nexus_prefs";
     private static final String WORK_TAG = "nexus_notif";
@@ -29,9 +28,7 @@ public class MainActivity extends AppCompatActivity {
     private WebView webView;
     private ProgressBar progressBar;
     private SwipeRefreshLayout swipeRefreshLayout;
-
-    // ActivityResultLauncher для запроса разрешения
-    private ActivityResultLauncher<String> notifPermLauncher;
+    private ActivityResultLauncher<String> notifLauncher;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -42,71 +39,57 @@ public class MainActivity extends AppCompatActivity {
         progressBar        = findViewById(R.id.progress_bar);
         swipeRefreshLayout = findViewById(R.id.swipe_refresh);
 
-        // Создаём канал уведомлений (нужно до запроса разрешения)
         createNotificationChannel();
 
-        // Регистрируем launcher ДО onStart (обязательное требование AndroidX)
-        notifPermLauncher = registerForActivityResult(
+        notifLauncher = registerForActivityResult(
             new ActivityResultContracts.RequestPermission(),
-            granted -> {
-                // granted = true если пользователь нажал Разрешить
-                if (granted) scheduleWork();
-            }
+            granted -> { if (granted) startServices(); }
         );
 
         setupWebView(savedInstanceState);
 
-        // Запрашиваем разрешение после небольшой задержки чтобы UI успел отрисоваться
-        webView.postDelayed(this::askNotificationPermission, 1500);
+        // Запрашиваем разрешение через 1.5 сек
+        webView.postDelayed(this::requestNotifPermission, 1500);
     }
 
-    private void askNotificationPermission() {
+    private void requestNotifPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+ — нужно явно запросить POST_NOTIFICATIONS
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
                     == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                // уже есть — сразу планируем работу
-                scheduleWork();
-            } else if (shouldShowRequestPermissionRationale(
-                    android.Manifest.permission.POST_NOTIFICATIONS)) {
-                // Пользователь уже отказал — показываем объяснение
+                startServices();
+            } else if (shouldShowRequestPermissionRationale(android.Manifest.permission.POST_NOTIFICATIONS)) {
                 new AlertDialog.Builder(this)
                     .setTitle("Уведомления NEXUS")
-                    .setMessage("Разрешите уведомления чтобы получать оповещения о новых сообщениях от клиентов.")
-                    .setPositiveButton("Разрешить", (d, w) ->
-                        notifPermLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS))
-                    .setNegativeButton("Не сейчас", null)
-                    .show();
+                    .setMessage("Разрешите уведомления чтобы получать сообщения от клиентов мгновенно.")
+                    .setPositiveButton("Разрешить", (d, w) -> notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS))
+                    .setNegativeButton("Не сейчас", null).show();
             } else {
-                // Первый раз — показываем системный диалог
-                notifPermLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS);
+                notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS);
             }
         } else {
-            // Android < 13 — разрешение не нужно, сразу планируем
-            scheduleWork();
+            startServices();
         }
     }
 
-    private void scheduleWork() {
-        Constraints c = new Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build();
-        PeriodicWorkRequest req = new PeriodicWorkRequest.Builder(
-                NotificationWorker.class, 15, TimeUnit.MINUTES)
-            .setConstraints(c)
-            .addTag(WORK_TAG)
-            .build();
+    private void startServices() {
+        // 1. SSE Foreground Service — мгновенные уведомления
+        Intent sseIntent = new Intent(this, SseService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(sseIntent);
+        } else {
+            startService(sseIntent);
+        }
+        // 2. WorkManager — резервный опрос каждые 15 мин
         WorkManager.getInstance(this).enqueueUniquePeriodicWork(
-            WORK_TAG,
-            ExistingPeriodicWorkPolicy.KEEP,
-            req);
+            WORK_TAG, ExistingPeriodicWorkPolicy.KEEP,
+            new PeriodicWorkRequest.Builder(NotificationWorker.class, 15, TimeUnit.MINUTES)
+                .setConstraints(new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                .addTag(WORK_TAG).build());
     }
 
     private void createNotificationChannel() {
         NotificationChannel ch = new NotificationChannel(
-            "nexus_messages", "Сообщения NEXUS",
-            NotificationManager.IMPORTANCE_HIGH);
-        ch.setDescription("Новые сообщения от клиентов");
+            "nexus_messages", "Сообщения NEXUS", NotificationManager.IMPORTANCE_HIGH);
         ch.enableVibration(true);
         getSystemService(NotificationManager.class).createNotificationChannel(ch);
     }
@@ -124,74 +107,47 @@ public class MainActivity extends AppCompatActivity {
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
             public void setToken(String token) {
-                getSharedPreferences(PREFS, MODE_PRIVATE)
-                    .edit().putString("token", token).apply();
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("token", token).apply();
+                // Перезапускаем SSE сервис с новым токеном
+                startService(new Intent(MainActivity.this, SseService.class));
             }
             @JavascriptInterface
             public void clearToken() {
-                getSharedPreferences(PREFS, MODE_PRIVATE)
-                    .edit().remove("token").remove("last_unread").apply();
-                WorkManager.getInstance(MainActivity.this)
-                    .cancelAllWorkByTag(WORK_TAG);
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("token").remove("last_unread").apply();
+                stopService(new Intent(MainActivity.this, SseService.class));
+                WorkManager.getInstance(MainActivity.this).cancelAllWorkByTag(WORK_TAG);
             }
         }, "AndroidBridge");
 
         webView.setWebViewClient(new WebViewClient() {
-            @Override
-            public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {
-                progressBar.setVisibility(View.VISIBLE);
-            }
-            @Override
-            public void onPageFinished(WebView v, String url) {
+            @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) { progressBar.setVisibility(View.VISIBLE); }
+            @Override public void onPageFinished(WebView v, String url) {
                 progressBar.setVisibility(View.GONE);
                 swipeRefreshLayout.setRefreshing(false);
-                v.evaluateJavascript(
-                    "(function(){var t=localStorage.getItem('token');" +
-                    "if(t&&t!='null')AndroidBridge.setToken(t);})()", null);
+                v.evaluateJavascript("(function(){var t=localStorage.getItem('token');if(t&&t!='null')AndroidBridge.setToken(t);})()", null);
             }
-            @Override
-            public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
-                h.proceed();
-            }
-            @Override
-            public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+            @Override public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) { h.proceed(); }
+            @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
                 String url = r.getUrl().toString();
                 if (url.startsWith("http://186.246.46.119")) return false;
-                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-                return true;
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); return true;
             }
         });
-
         webView.setWebChromeClient(new WebChromeClient() {
-            @Override
-            public void onProgressChanged(WebView v, int p) {
-                progressBar.setProgress(p);
-                if (p == 100) progressBar.setVisibility(View.GONE);
+            @Override public void onProgressChanged(WebView v, int p) {
+                progressBar.setProgress(p); if (p == 100) progressBar.setVisibility(View.GONE);
             }
         });
-
         swipeRefreshLayout.setOnRefreshListener(() -> webView.reload());
-
-        if (savedState != null) webView.restoreState(savedState);
-        else webView.loadUrl(APP_URL);
+        if (savedState != null) webView.restoreState(savedState); else webView.loadUrl(APP_URL);
     }
 
-    @Override
-    protected void onSaveInstanceState(Bundle out) {
-        super.onSaveInstanceState(out);
-        webView.saveState(out);
-    }
-    @Override
-    public boolean onKeyDown(int k, KeyEvent e) {
-        if (k == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
-            webView.goBack(); return true;
-        }
+    @Override protected void onSaveInstanceState(Bundle out) { super.onSaveInstanceState(out); webView.saveState(out); }
+    @Override public boolean onKeyDown(int k, KeyEvent e) {
+        if (k == KeyEvent.KEYCODE_BACK && webView.canGoBack()) { webView.goBack(); return true; }
         return super.onKeyDown(k, e);
     }
     @Override protected void onResume()  { super.onResume();  webView.onResume(); }
-    @Override protected void onPause()   { super.onPause();   webView.onPause();  }
-    @Override protected void onDestroy() {
-        if (webView != null) webView.destroy();
-        super.onDestroy();
-    }
+    @Override protected void onPause()   { super.onPause();   webView.onPause(); }
+    @Override protected void onDestroy() { if (webView != null) webView.destroy(); super.onDestroy(); }
 }
