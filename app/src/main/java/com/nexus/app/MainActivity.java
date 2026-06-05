@@ -4,8 +4,10 @@ import android.annotation.SuppressLint;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.net.http.SslError;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.KeyEvent;
 import android.view.View;
@@ -23,6 +25,7 @@ public class MainActivity extends AppCompatActivity {
     private WebView webView;
     private ProgressBar progressBar;
     private ActivityResultLauncher<String> permLauncher;
+    private boolean sseStarted = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -32,40 +35,50 @@ public class MainActivity extends AppCompatActivity {
         webView     = findViewById(R.id.webview);
         progressBar = findViewById(R.id.progress_bar);
 
-        // Создаём канал уведомлений
+        // Канал уведомлений
         NotificationChannel ch = new NotificationChannel(
             "nexus_messages", "Сообщения NEXUS",
             NotificationManager.IMPORTANCE_HIGH);
         ch.enableVibration(true);
-        getSystemService(NotificationManager.class).createNotificationChannel(ch);
+        ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
+            .createNotificationChannel(ch);
 
-        // Регистрируем запрос разрешения
+        // Регистрируем запрос разрешения ДО onStart
         permLauncher = registerForActivityResult(
             new ActivityResultContracts.RequestPermission(),
-            granted -> { if (granted) launchSseService(); }
+            granted -> {
+                // После ответа пользователя запускаем SSE если токен уже есть
+                String tok = getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .getString("token", null);
+                if (tok != null) launchSse();
+            }
         );
 
         setupWebView(savedInstanceState);
+
+        // Запрашиваем разрешение на уведомления сразу при запуске (через 1 сек)
+        webView.postDelayed(() -> {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                        != PackageManager.PERMISSION_GRANTED) {
+                    permLauncher.launch("android.permission.POST_NOTIFICATIONS");
+                }
+            }
+        }, 1000);
     }
 
-    private void launchSseService() {
+    private void launchSse() {
+        if (sseStarted) return;
+        sseStarted = true;
         try {
             Intent i = new Intent(this, SseService.class);
-            startForegroundService(i);
-        } catch (Exception ignored) {}
-    }
-
-    // Вызывается после того как страница загрузилась и токен извлечён
-    private void onTokenReady() {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            int granted = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS);
-            if (granted == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                launchSseService();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(i);
             } else {
-                permLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS);
+                startService(i);
             }
-        } else {
-            launchSseService();
+        } catch (Exception e) {
+            sseStarted = false;
         }
     }
 
@@ -81,9 +94,10 @@ public class MainActivity extends AppCompatActivity {
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
             public void setToken(String token) {
+                if (token == null || token.isEmpty()) return;
                 getSharedPreferences(PREFS, MODE_PRIVATE)
                     .edit().putString("token", token).apply();
-                runOnUiThread(() -> onTokenReady());
+                runOnUiThread(() -> launchSse());
             }
         }, "AndroidBridge");
 
@@ -95,11 +109,11 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageFinished(WebView v, String url) {
                 progressBar.setVisibility(View.GONE);
-                // Извлекаем токен из localStorage
+                // Читаем токен из localStorage
                 v.evaluateJavascript(
                     "(function(){" +
-                    "  var t=localStorage.getItem('token');" +
-                    "  if(t && t!='null') AndroidBridge.setToken(t);" +
+                    "var t=localStorage.getItem(\"token\");" +
+                    "if(t&&t!==\"null\"&&t!==\"undefined\")AndroidBridge.setToken(t);" +
                     "})()", null);
             }
             @Override
@@ -136,8 +150,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public boolean onKeyDown(int k, KeyEvent e) {
         if (k == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
-            webView.goBack();
-            return true;
+            webView.goBack(); return true;
         }
         return super.onKeyDown(k, e);
     }
