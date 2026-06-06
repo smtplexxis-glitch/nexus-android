@@ -4,13 +4,11 @@ import android.annotation.SuppressLint;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
-import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
 import android.webkit.*;
@@ -20,9 +18,8 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 
 public class MainActivity extends AppCompatActivity {
-    private static final String TAG    = "NexusMain";
-    private static final String URL    = "http://186.246.46.119/app/";
-    private static final String PREFS  = "nexus_prefs";
+    private static final String APP_URL = "http://186.246.46.119/app/";
+    private static final String PREFS   = "nexus_prefs";
 
     private WebView webView;
     private ProgressBar progressBar;
@@ -32,7 +29,6 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        Log.d(TAG, "onCreate");
 
         webView     = findViewById(R.id.webview);
         progressBar = findViewById(R.id.progress_bar);
@@ -43,47 +39,33 @@ public class MainActivity extends AppCompatActivity {
         ch.enableVibration(true);
         ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(ch);
 
+        // Запрашиваем разрешение, потом запускаем сервис
         permLauncher = registerForActivityResult(
             new ActivityResultContracts.RequestPermission(),
-            granted -> {
-                Log.d(TAG, "Permission result: " + granted);
-                startSse();
-            }
+            granted -> startNotifService()
         );
 
         setupWebView(savedInstanceState);
 
-        // Запрашиваем разрешение через 1 сек после старта
+        // Запрос разрешения через 1 сек
         webView.postDelayed(() -> {
-            Log.d(TAG, "Requesting notification permission");
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
                         == PackageManager.PERMISSION_GRANTED) {
-                    Log.d(TAG, "Permission already granted");
-                    startSse();
+                    startNotifService();
                 } else {
                     permLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS);
                 }
             } else {
-                startSse();
+                startNotifService();
             }
         }, 1000);
     }
 
-    private void startSse() {
-        String token = getSharedPreferences(PREFS, MODE_PRIVATE).getString("token", null);
-        Log.d(TAG, "startSse token=" + (token != null ? "present(len="+token.length()+")" : "null"));
+    private void startNotifService() {
         try {
-            Intent i = new Intent(this, SseService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(i);
-            } else {
-                startService(i);
-            }
-            Log.d(TAG, "SseService started");
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to start SseService: " + e);
-        }
+            startService(new Intent(this, NotificationService.class));
+        } catch (Exception ignored) {}
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -98,28 +80,26 @@ public class MainActivity extends AppCompatActivity {
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
             public void setToken(String token) {
-                Log.d(TAG, "setToken called, len=" + (token != null ? token.length() : 0));
                 if (token == null || token.isEmpty()) return;
                 getSharedPreferences(PREFS, MODE_PRIVATE)
                     .edit().putString("token", token).apply();
-                // Перезапускаем сервис с новым токеном
-                runOnUiThread(() -> startSse());
+                // Перезапускаем сервис чтобы он подхватил новый токен
+                runOnUiThread(() -> {
+                    stopService(new Intent(MainActivity.this, NotificationService.class));
+                    startService(new Intent(MainActivity.this, NotificationService.class));
+                });
             }
         }, "AndroidBridge");
 
         webView.setWebViewClient(new WebViewClient() {
-            @Override public void onPageStarted(WebView v, String u, android.graphics.Bitmap f) {
+            @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {
                 progressBar.setVisibility(View.VISIBLE);
             }
-            @Override public void onPageFinished(WebView v, String u) {
+            @Override public void onPageFinished(WebView v, String url) {
                 progressBar.setVisibility(View.GONE);
-                Log.d(TAG, "Page loaded: " + u);
                 v.evaluateJavascript(
-                    "(function(){" +
-                    "var t=localStorage.getItem(\"token\");" +
-                    "if(t&&t!==\"null\"&&t!==\"undefined\")AndroidBridge.setToken(t);" +
-                    "return t;" +
-                    "})()", val -> Log.d(TAG, "localStorage token: " + val));
+                    "(function(){var t=localStorage.getItem(\"token\");" +
+                    "if(t&&t!==\"null\"&&t!==\"undefined\")AndroidBridge.setToken(t);})()", null);
             }
             @Override public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
                 h.proceed();
@@ -140,12 +120,11 @@ public class MainActivity extends AppCompatActivity {
         });
 
         if (savedState != null) webView.restoreState(savedState);
-        else webView.loadUrl(URL);
+        else webView.loadUrl(APP_URL);
     }
 
     @Override protected void onSaveInstanceState(Bundle out) {
-        super.onSaveInstanceState(out);
-        webView.saveState(out);
+        super.onSaveInstanceState(out); webView.saveState(out);
     }
     @Override public boolean onKeyDown(int k, KeyEvent e) {
         if (k == KeyEvent.KEYCODE_BACK && webView.canGoBack()) { webView.goBack(); return true; }
