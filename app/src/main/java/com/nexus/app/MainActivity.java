@@ -6,23 +6,22 @@ import android.content.*;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.net.http.SslError;
-import android.os.Build;
-import android.os.Bundle;
+import android.os.*;
 import android.view.KeyEvent;
 import android.view.View;
 import android.webkit.*;
 import android.widget.ProgressBar;
-import androidx.activity.result.ActivityResultLauncher;
-import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 
 public class MainActivity extends AppCompatActivity {
+
     private static final String APP_URL = "http://186.246.46.119/app/";
     private static final String PREFS   = "nexus_prefs";
+    private static final int    REQ_NOTIF = 42;
 
-    private WebView webView;
+    private WebView     webView;
     private ProgressBar progressBar;
-    private ActivityResultLauncher<String> permLauncher;
+    private boolean     permAsked = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -32,33 +31,35 @@ public class MainActivity extends AppCompatActivity {
         webView     = findViewById(R.id.webview);
         progressBar = findViewById(R.id.progress_bar);
 
-        // Канал уведомлений
-        NotificationChannel ch = new NotificationChannel(
-            "nexus_messages", "Сообщения NEXUS", NotificationManager.IMPORTANCE_HIGH);
-        ch.enableVibration(true);
-        ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
-            .createNotificationChannel(ch);
-
-        permLauncher = registerForActivityResult(
-            new ActivityResultContracts.RequestPermission(),
-            granted -> scheduleAlarm()
-        );
-
+        createNotifChannel();
         setupWebView(savedInstanceState);
+    }
 
-        // Запрашиваем разрешение через 1 сек
-        webView.postDelayed(() -> {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
-                        == PackageManager.PERMISSION_GRANTED) {
-                    scheduleAlarm();
-                } else {
-                    permLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS);
-                }
+    @Override
+    protected void onResume() {
+        super.onResume();
+        webView.onResume();
+        // Запрашиваем разрешение один раз при первом показе экрана
+        if (!permAsked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permAsked = true;
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(
+                    new String[]{android.Manifest.permission.POST_NOTIFICATIONS},
+                    REQ_NOTIF);
             } else {
                 scheduleAlarm();
             }
-        }, 1000);
+        } else if (!permAsked) {
+            permAsked = true;
+            scheduleAlarm();
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int req, String[] perms, int[] res) {
+        super.onRequestPermissionsResult(req, perms, res);
+        if (req == REQ_NOTIF) scheduleAlarm();
     }
 
     private void scheduleAlarm() {
@@ -66,9 +67,19 @@ public class MainActivity extends AppCompatActivity {
         Intent i = new Intent(this, PollReceiver.class);
         PendingIntent pi = PendingIntent.getBroadcast(this, 0, i,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        // Каждые 30 секунд, точный будильник (работает даже в doze mode)
+        // Каждые 60 секунд (минимум для setRepeating на Android 12+)
         am.setRepeating(AlarmManager.RTC_WAKEUP,
-            System.currentTimeMillis() + 5000, 30000, pi);
+            System.currentTimeMillis() + 5000, 60_000, pi);
+    }
+
+    private void createNotifChannel() {
+        NotificationChannel ch = new NotificationChannel(
+            "nexus_messages", "Сообщения NEXUS",
+            NotificationManager.IMPORTANCE_HIGH);
+        ch.setDescription("Новые сообщения от клиентов");
+        ch.enableVibration(true);
+        ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
+            .createNotificationChannel(ch);
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -97,8 +108,12 @@ public class MainActivity extends AppCompatActivity {
             @Override public void onPageFinished(WebView v, String url) {
                 progressBar.setVisibility(View.GONE);
                 v.evaluateJavascript(
-                    "(function(){var t=localStorage.getItem(\"token\");" +
-                    "if(t&&t!==\"null\"&&t!==\"undefined\")AndroidBridge.setToken(t);})()", null);
+                    "(function(){" +
+                    "  var t = localStorage.getItem('token');" +
+                    "  if (t && t !== 'null' && t !== 'undefined' && t !== '') {" +
+                    "    AndroidBridge.setToken(t);" +
+                    "  }" +
+                    "})()", null);
             }
             @Override public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
                 h.proceed();
@@ -123,13 +138,18 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override protected void onSaveInstanceState(Bundle out) {
-        super.onSaveInstanceState(out); webView.saveState(out);
+        super.onSaveInstanceState(out);
+        webView.saveState(out);
     }
     @Override public boolean onKeyDown(int k, KeyEvent e) {
-        if (k == KeyEvent.KEYCODE_BACK && webView.canGoBack()) { webView.goBack(); return true; }
+        if (k == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
+            webView.goBack(); return true;
+        }
         return super.onKeyDown(k, e);
     }
-    @Override protected void onResume()  { super.onResume();  webView.onResume(); }
-    @Override protected void onPause()   { super.onPause();   webView.onPause(); }
-    @Override protected void onDestroy() { if (webView != null) webView.destroy(); super.onDestroy(); }
+    @Override protected void onPause()   { super.onPause();   webView.onPause();  }
+    @Override protected void onDestroy() {
+        if (webView != null) webView.destroy();
+        super.onDestroy();
+    }
 }
