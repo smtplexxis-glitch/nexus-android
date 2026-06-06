@@ -8,8 +8,8 @@ android {
         applicationId "com.nexus.app"
         minSdk 30
         targetSdk 34
-        versionCode 9
-        versionName "1.8"
+        versionCode 10
+        versionName "2.0"
     }
     signingConfigs {
         release {
@@ -32,5 +32,4 @@ android {
 }
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation 'androidx.work:work-runtime:2.9.0'
 }
