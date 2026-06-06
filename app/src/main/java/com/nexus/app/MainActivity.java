@@ -1,9 +1,8 @@
 package com.nexus.app;
 
 import android.annotation.SuppressLint;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.content.Intent;
+import android.app.*;
+import android.content.*;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.net.http.SslError;
@@ -37,35 +36,39 @@ public class MainActivity extends AppCompatActivity {
         NotificationChannel ch = new NotificationChannel(
             "nexus_messages", "Сообщения NEXUS", NotificationManager.IMPORTANCE_HIGH);
         ch.enableVibration(true);
-        ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(ch);
+        ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
+            .createNotificationChannel(ch);
 
-        // Запрашиваем разрешение, потом запускаем сервис
         permLauncher = registerForActivityResult(
             new ActivityResultContracts.RequestPermission(),
-            granted -> startNotifService()
+            granted -> scheduleAlarm()
         );
 
         setupWebView(savedInstanceState);
 
-        // Запрос разрешения через 1 сек
+        // Запрашиваем разрешение через 1 сек
         webView.postDelayed(() -> {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
                         == PackageManager.PERMISSION_GRANTED) {
-                    startNotifService();
+                    scheduleAlarm();
                 } else {
                     permLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS);
                 }
             } else {
-                startNotifService();
+                scheduleAlarm();
             }
         }, 1000);
     }
 
-    private void startNotifService() {
-        try {
-            startService(new Intent(this, NotificationService.class));
-        } catch (Exception ignored) {}
+    private void scheduleAlarm() {
+        AlarmManager am = (AlarmManager) getSystemService(ALARM_SERVICE);
+        Intent i = new Intent(this, PollReceiver.class);
+        PendingIntent pi = PendingIntent.getBroadcast(this, 0, i,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        // Каждые 30 секунд, точный будильник (работает даже в doze mode)
+        am.setRepeating(AlarmManager.RTC_WAKEUP,
+            System.currentTimeMillis() + 5000, 30000, pi);
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -83,11 +86,7 @@ public class MainActivity extends AppCompatActivity {
                 if (token == null || token.isEmpty()) return;
                 getSharedPreferences(PREFS, MODE_PRIVATE)
                     .edit().putString("token", token).apply();
-                // Перезапускаем сервис чтобы он подхватил новый токен
-                runOnUiThread(() -> {
-                    stopService(new Intent(MainActivity.this, NotificationService.class));
-                    startService(new Intent(MainActivity.this, NotificationService.class));
-                });
+                runOnUiThread(() -> scheduleAlarm());
             }
         }, "AndroidBridge");
 
