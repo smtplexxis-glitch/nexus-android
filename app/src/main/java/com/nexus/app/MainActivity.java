@@ -12,19 +12,15 @@ import android.view.View;
 import android.webkit.*;
 import android.widget.ProgressBar;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.work.*;
-import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final String APP_URL  = "http://186.246.46.119/app/";
-    private static final String PREFS    = "nexus_prefs";
-    private static final String WORK_TAG = "nexus_poll";
-    private static final int    REQ_PERM = 42;
+    private static final String APP_URL = "http://186.246.46.119/app/";
+    private static final int    REQ     = 42;
 
     private WebView     webView;
     private ProgressBar progressBar;
-    private boolean     permRequested = false;
+    private boolean     asked = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -40,36 +36,20 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         webView.onResume();
-        if (!permRequested) {
-            permRequested = true;
+        if (!asked) {
+            asked = true;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
                     != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(
-                    new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, REQ_PERM);
-            } else {
-                scheduleWork();
+                    new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, REQ);
             }
         }
     }
 
     @Override
-    public void onRequestPermissionsResult(int req, String[] p, int[] res) {
-        super.onRequestPermissionsResult(req, p, res);
-        if (req == REQ_PERM) scheduleWork();
-    }
-
-    private void scheduleWork() {
-        Constraints c = new Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build();
-        PeriodicWorkRequest req = new PeriodicWorkRequest.Builder(
-                PollWorker.class, 15, TimeUnit.MINUTES)
-            .setConstraints(c)
-            .addTag(WORK_TAG)
-            .build();
-        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
-            WORK_TAG, ExistingPeriodicWorkPolicy.KEEP, req);
+    public void onRequestPermissionsResult(int req, String[] p, int[] r) {
+        super.onRequestPermissionsResult(req, p, r);
     }
 
     private void createChannel() {
@@ -81,6 +61,25 @@ public class MainActivity extends AppCompatActivity {
             .createNotificationChannel(ch);
     }
 
+    // Показываем нативное Android уведомление
+    private void showNativeNotif(String title, String body) {
+        Intent i = new Intent(this, MainActivity.class);
+        i.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent pi = PendingIntent.getActivity(this, 0, i,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        android.app.Notification n = new androidx.core.app.NotificationCompat
+            .Builder(this, "nexus_messages")
+            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(pi)
+            .build();
+        ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
+            .notify((int)(System.currentTimeMillis() % 10000), n);
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     private void setupWebView(Bundle savedState) {
         WebSettings ws = webView.getSettings();
@@ -90,25 +89,37 @@ public class MainActivity extends AppCompatActivity {
         ws.setCacheMode(WebSettings.LOAD_DEFAULT);
         ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
 
+        // Мост: страница вызывает AndroidNotify.show(title, body)
+        // вместо new Notification()
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
-            public void setToken(String token) {
-                if (token == null || token.isEmpty()) return;
-                getSharedPreferences(PREFS, MODE_PRIVATE)
-                    .edit().putString("token", token).apply();
+            public void show(String title, String body) {
+                runOnUiThread(() -> showNativeNotif(title, body));
             }
-        }, "AndroidBridge");
+            @JavascriptInterface
+            public boolean isAndroid() { return true; }
+        }, "AndroidNotify");
 
         webView.setWebViewClient(new WebViewClient() {
-            @Override public void onPageStarted(WebView v, String u, android.graphics.Bitmap f) {
+            @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {
                 progressBar.setVisibility(View.VISIBLE);
             }
-            @Override public void onPageFinished(WebView v, String u) {
+            @Override public void onPageFinished(WebView v, String url) {
                 progressBar.setVisibility(View.GONE);
+                // Переопределяем window.Notification чтобы страница
+                // думала что разрешение выдано, а реально зовёт наш мост
                 v.evaluateJavascript(
-                    "(function(){var t=localStorage.getItem('token');" +
-                    "if(t&&t!='null'&&t!='undefined'&&t!='')AndroidBridge.setToken(t);})()",
-                    null);
+                    "(function() {" +
+                    "  if (window.AndroidNotify) {" +
+                    "    window.Notification = function(title, opts) {" +
+                    "      AndroidNotify.show(title, (opts && opts.body) ? opts.body : '');" +
+                    "    };" +
+                    "    window.Notification.permission = 'granted';" +
+                    "    window.Notification.requestPermission = function() {" +
+                    "      return Promise.resolve('granted');" +
+                    "    };" +
+                    "  }" +
+                    "})()", null);
             }
             @Override public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
                 h.proceed();
