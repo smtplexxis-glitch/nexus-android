@@ -1,132 +1,87 @@
-import shutil, py_compile
+
+import shutil, py_compile, os
 
 src = '/opt/nexus/main.py.bak3'
 dst = '/opt/nexus/main.py'
 shutil.copy(src, dst)
-lines = open(dst).readlines()
-print(f"Restored: {len(lines)} lines")
+c = open(dst).read()
 
-sse_header = """from sse_starlette.sse import EventSourceResponse
+fcm_block = """import json as _json
 import asyncio as _asyncio
-import json as _json
+import requests as _requests
+import os as _os
 
-_sse_clients = {}
+_fcm_tokens = {}
 
-def _push_notify(user_id, title, body):
-    q = _sse_clients.get(user_id)
-    if q:
-        try: q.put_nowait(_json.dumps({"title": title, "body": body}))
-        except: pass
+def _load_fcm_tokens():
+    try:
+        conn = get_db()
+        rows = conn.execute("SELECT user_id, fcm_token FROM user_fcm_tokens").fetchall()
+        for row in rows: _fcm_tokens[row["user_id"]] = row["fcm_token"]
+        conn.close()
+    except: pass
+
+def _send_fcm(user_id, title, body):
+    token = _fcm_tokens.get(user_id)
+    if not token: return
+    try:
+        key_file = '/opt/nexus/fcm_server_key.txt'
+        if not _os.path.exists(key_file): return
+        server_key = open(key_file).read().strip()
+        _requests.post("https://fcm.googleapis.com/fcm/send",
+            json={"to": token, "notification": {"title": title, "body": body},
+                  "data": {"title": title, "body": body},
+                  "priority": "high"},
+            headers={"Authorization": "key=" + server_key,
+                     "Content-Type": "application/json"}, timeout=10)
+    except Exception as e:
+        print("[FCM] error:", e)
 
 """
 
-# Фоновый поллинг — добавляем в конец файла как lifespan или startup
-bg_poller = """
+c = c.replace("from fastapi import", fcm_block + "from fastapi import", 1)
 
-# ── BACKGROUND POLLER ────────────────────────────────────────────────────────
-import threading as _threading
-import time as _time
-
-def _bg_poll_loop():
-    \"\"\"Каждые 30 сек синхронизирует все активные интеграции и пушит уведомления\"\"\"
-    import asyncio
-    _time.sleep(15)  # первый запуск через 15 сек после старта
-    while True:
-        try:
-            conn = get_db()
-            # Берём все активные интеграции
-            rows = conn.execute(
-                "SELECT id, project_id, platform, credentials FROM integrations WHERE is_active=1"
-            ).fetchall()
-            conn.close()
-            for row in rows:
-                int_id = row["id"]
-                pid    = row["project_id"]
-                p      = row["platform"]
-                creds  = creds_dict(row["credentials"])
-                try:
-                    loop = asyncio.new_event_loop()
-                    if p == "avito":
-                        loop.run_until_complete(sync_avito(int_id, pid, creds))
-                    elif p == "drom":
-                        loop.run_until_complete(sync_drom(int_id, pid, creds))
-                    elif p == "yula":
-                        loop.run_until_complete(sync_yula(int_id, pid, creds))
-                    loop.close()
-                except Exception as ex:
-                    pass
-        except Exception as ex:
-            pass
-        _time.sleep(30)
-
-_poll_thread = _threading.Thread(target=_bg_poll_loop, daemon=True)
-_poll_thread.start()
-"""
-
-# SSE endpoint
-sse_endpoint = """
-@app.get("/api/sse")
-async def sse_stream(sess=Depends(auth_user)):
-    uid = sess["user_id"]
-    q = _asyncio.Queue(maxsize=20)
-    _sse_clients[uid] = q
-    async def gen():
-        try:
-            yield {"data": "connected"}
-            while True:
-                try:
-                    data = await _asyncio.wait_for(q.get(), timeout=25)
-                    yield {"data": data}
-                except _asyncio.TimeoutError:
-                    yield {"data": "ping"}
-        finally:
-            _sse_clients.pop(uid, None)
-    return EventSourceResponse(gen())
-"""
-
-# 1. Вставляем SSE header после "from fastapi import"
+lines = c.split("\n")
 new_lines = []
-inserted_header = False
+in_avito = False
+avito_done = False
 for line in lines:
     new_lines.append(line)
-    if not inserted_header and line.startswith("from fastapi import"):
-        new_lines.insert(len(new_lines)-1, sse_header)
-        inserted_header = True
-
-# 2. Вставляем _push_notify в sync_avito — после conn.commit() внутри неё
-#    и в telegram webhook
-final_lines = []
-in_avito_func = False
-avito_push_done = False
-
-for i, line in enumerate(new_lines):
-    final_lines.append(line)
-
-    if 'async def sync_avito(' in line:
-        in_avito_func = True
-        avito_push_done = False
-
-    if in_avito_func and not avito_push_done and 'conn.commit()' in line:
+    if "async def sync_avito(" in line:
+        in_avito = True; avito_done = False
+    if in_avito and not avito_done and "conn.commit()" in line:
         indent = len(line) - len(line.lstrip())
-        final_lines.append(' ' * indent + '_push_notify(project_id, "Авито: "+name, last_text[:100] if last_text else "[фото]")\n')
-        avito_push_done = True
-        in_avito_func = False
-        print(f"Added Avito push at line ~{i}")
-
-    if '[telegram webhook] New message' in line and 'print(' in line:
+        new_lines.append(" " * indent + '_send_fcm(project_id, "Авито: "+name, last_text[:100] if last_text else "[фото]")')
+        avito_done = True; in_avito = False
+    if "[telegram webhook] New message" in line and "print(" in line:
         indent = len(line) - len(line.lstrip())
-        final_lines.append(' ' * indent + '_push_notify(pid, "Telegram: "+name, text[:100] if text else "[media]")\n')
-        print(f"Added Telegram push at line ~{i}")
+        new_lines.append(" " * indent + '_send_fcm(pid, "Telegram: "+name, text[:100] if text else "[media]")')
 
-# 3. Добавляем фоновый поллер и SSE endpoint в конец
-final_lines.append(bg_poller)
-final_lines.append(sse_endpoint)
+c = "\n".join(new_lines)
 
-open(dst, 'w').writelines(final_lines)
-print(f"Final: {len(final_lines)} lines")
+fcm_endpoint = """
 
+@app.post("/api/fcm-token")
+async def register_fcm_token(req: dict, sess=Depends(auth_user)):
+    token = req.get("token", "")
+    if not token: return {"ok": False}
+    uid = sess["user_id"]
+    _fcm_tokens[uid] = token
+    try:
+        conn = get_db()
+        conn.execute("CREATE TABLE IF NOT EXISTS user_fcm_tokens (user_id INTEGER PRIMARY KEY, fcm_token TEXT)")
+        conn.execute("INSERT OR REPLACE INTO user_fcm_tokens (user_id, fcm_token) VALUES (?,?)", (uid, token))
+        conn.commit(); conn.close()
+    except Exception as e:
+        print("[FCM] DB:", e)
+    return {"ok": True}
+"""
+
+c += fcm_endpoint
+open(dst, "w").write(c)
+print("Lines:", c.count("\n"))
 try:
     py_compile.compile(dst, doraise=True)
     print("SYNTAX OK")
 except Exception as e:
-    print(f"SYNTAX ERROR: {e}")
+    print("ERROR:", e)
