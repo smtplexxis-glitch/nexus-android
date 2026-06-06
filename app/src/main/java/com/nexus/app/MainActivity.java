@@ -12,10 +12,12 @@ import android.view.View;
 import android.webkit.*;
 import android.widget.ProgressBar;
 import androidx.appcompat.app.AppCompatActivity;
+import com.google.firebase.messaging.FirebaseMessaging;
 
 public class MainActivity extends AppCompatActivity {
 
     private static final String APP_URL = "http://186.246.46.119/app/";
+    private static final String PREFS   = "nexus_prefs";
     private static final int    REQ     = 42;
 
     private WebView     webView;
@@ -30,6 +32,13 @@ public class MainActivity extends AppCompatActivity {
         progressBar = findViewById(R.id.progress_bar);
         createChannel();
         setupWebView(savedInstanceState);
+        // Получаем FCM токен
+        FirebaseMessaging.getInstance().getToken().addOnCompleteListener(task -> {
+            if (task.isSuccessful() && task.getResult() != null) {
+                getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .edit().putString("fcm_token", task.getResult()).apply();
+            }
+        });
     }
 
     @Override
@@ -54,30 +63,10 @@ public class MainActivity extends AppCompatActivity {
 
     private void createChannel() {
         NotificationChannel ch = new NotificationChannel(
-            "nexus_messages", "Сообщения NEXUS",
-            NotificationManager.IMPORTANCE_HIGH);
+            "nexus_messages", "Сообщения NEXUS", NotificationManager.IMPORTANCE_HIGH);
         ch.enableVibration(true);
         ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
             .createNotificationChannel(ch);
-    }
-
-    // Показываем нативное Android уведомление
-    private void showNativeNotif(String title, String body) {
-        Intent i = new Intent(this, MainActivity.class);
-        i.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        PendingIntent pi = PendingIntent.getActivity(this, 0, i,
-            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        android.app.Notification n = new androidx.core.app.NotificationCompat
-            .Builder(this, "nexus_messages")
-            .setSmallIcon(android.R.drawable.ic_dialog_email)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
-            .setContentIntent(pi)
-            .build();
-        ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
-            .notify((int)(System.currentTimeMillis() % 10000), n);
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -89,15 +78,31 @@ public class MainActivity extends AppCompatActivity {
         ws.setCacheMode(WebSettings.LOAD_DEFAULT);
         ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
 
-        // Мост: страница вызывает AndroidNotify.show(title, body)
-        // вместо new Notification()
+        webView.addJavascriptInterface(new Object() {
+            @JavascriptInterface
+            public void setToken(String token) {
+                if (token == null || token.isEmpty()) return;
+                SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+                p.edit().putString("token", token).apply();
+                // Регистрируем FCM токен на сервере
+                String fcmToken = p.getString("fcm_token", null);
+                if (fcmToken != null) {
+                    registerFcmToken(token, fcmToken);
+                }
+            }
+            @JavascriptInterface
+            public void show(String title, String body) {
+                // fallback — прямой вызов уведомления из JS
+                runOnUiThread(() -> showDirectNotif(title, body));
+            }
+        }, "AndroidBridge");
+
+        // Также регистрируем AndroidNotify для совместимости
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
             public void show(String title, String body) {
-                runOnUiThread(() -> showNativeNotif(title, body));
+                runOnUiThread(() -> showDirectNotif(title, body));
             }
-            @JavascriptInterface
-            public boolean isAndroid() { return true; }
         }, "AndroidNotify");
 
         webView.setWebViewClient(new WebViewClient() {
@@ -106,20 +111,10 @@ public class MainActivity extends AppCompatActivity {
             }
             @Override public void onPageFinished(WebView v, String url) {
                 progressBar.setVisibility(View.GONE);
-                // Переопределяем window.Notification чтобы страница
-                // думала что разрешение выдано, а реально зовёт наш мост
                 v.evaluateJavascript(
-                    "(function() {" +
-                    "  if (window.AndroidNotify) {" +
-                    "    window.Notification = function(title, opts) {" +
-                    "      AndroidNotify.show(title, (opts && opts.body) ? opts.body : '');" +
-                    "    };" +
-                    "    window.Notification.permission = 'granted';" +
-                    "    window.Notification.requestPermission = function() {" +
-                    "      return Promise.resolve('granted');" +
-                    "    };" +
-                    "  }" +
-                    "})()", null);
+                    "(function(){var t=localStorage.getItem('token');" +
+                    "if(t&&t!='null'&&t!='undefined'&&t!='')AndroidBridge.setToken(t);})()",
+                    null);
             }
             @Override public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
                 h.proceed();
@@ -141,6 +136,37 @@ public class MainActivity extends AppCompatActivity {
 
         if (savedState != null) webView.restoreState(savedState);
         else webView.loadUrl(APP_URL);
+    }
+
+    private void registerFcmToken(String authToken, String fcmToken) {
+        new Thread(() -> {
+            try {
+                java.net.HttpURLConnection c = (java.net.HttpURLConnection)
+                    new java.net.URL("http://186.246.46.119/api/fcm-token").openConnection();
+                c.setRequestMethod("POST");
+                c.setRequestProperty("Authorization", "Bearer " + authToken);
+                c.setRequestProperty("Content-Type", "application/json");
+                c.setDoOutput(true);
+                c.getOutputStream().write(("{\"token\":\"" + fcmToken + "\"}").getBytes());
+                c.getResponseCode();
+                c.disconnect();
+            } catch (Exception ignored) {}
+        }).start();
+    }
+
+    private void showDirectNotif(String title, String body) {
+        Intent i = new Intent(this, MainActivity.class);
+        i.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent pi = PendingIntent.getActivity(this, 0, i,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
+            .notify((int)(System.currentTimeMillis() % 10000),
+                new NotificationCompat.Builder(this, "nexus_messages")
+                    .setSmallIcon(android.R.drawable.ic_dialog_email)
+                    .setContentTitle(title.isEmpty() ? "NEXUS" : title)
+                    .setContentText(body.isEmpty() ? "Новое сообщение" : body)
+                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setAutoCancel(true).setContentIntent(pi).build());
     }
 
     @Override protected void onSaveInstanceState(Bundle out) {
