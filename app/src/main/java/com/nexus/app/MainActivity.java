@@ -12,6 +12,7 @@ import android.view.View;
 import android.webkit.*;
 import android.widget.ProgressBar;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.NotificationCompat;
 import com.google.firebase.messaging.FirebaseMessaging;
 
 public class MainActivity extends AppCompatActivity {
@@ -32,7 +33,6 @@ public class MainActivity extends AppCompatActivity {
         progressBar = findViewById(R.id.progress_bar);
         createChannel();
         setupWebView(savedInstanceState);
-        // Получаем FCM токен
         FirebaseMessaging.getInstance().getToken().addOnCompleteListener(task -> {
             if (task.isSuccessful() && task.getResult() != null) {
                 getSharedPreferences(PREFS, MODE_PRIVATE)
@@ -84,20 +84,15 @@ public class MainActivity extends AppCompatActivity {
                 if (token == null || token.isEmpty()) return;
                 SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
                 p.edit().putString("token", token).apply();
-                // Регистрируем FCM токен на сервере
                 String fcmToken = p.getString("fcm_token", null);
-                if (fcmToken != null) {
-                    registerFcmToken(token, fcmToken);
-                }
+                if (fcmToken != null) registerFcmToken(token, fcmToken);
             }
             @JavascriptInterface
             public void show(String title, String body) {
-                // fallback — прямой вызов уведомления из JS
                 runOnUiThread(() -> showDirectNotif(title, body));
             }
         }, "AndroidBridge");
 
-        // Также регистрируем AndroidNotify для совместимости
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
             public void show(String title, String body) {
@@ -113,8 +108,7 @@ public class MainActivity extends AppCompatActivity {
                 progressBar.setVisibility(View.GONE);
                 v.evaluateJavascript(
                     "(function(){var t=localStorage.getItem('token');" +
-                    "if(t&&t!='null'&&t!='undefined'&&t!='')AndroidBridge.setToken(t);})()",
-                    null);
+                    "if(t&&t!='null'&&t!='undefined'&&t!='')AndroidBridge.setToken(t);})()", null);
             }
             @Override public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
                 h.proceed();
