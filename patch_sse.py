@@ -8,7 +8,6 @@ c = open(dst).read()
 
 fcm_block = """import json as _json
 import asyncio as _asyncio
-import requests as _requests
 import os as _os
 
 _fcm_tokens = {}
@@ -16,24 +15,33 @@ _fcm_tokens = {}
 def _load_fcm_tokens():
     try:
         conn = get_db()
-        rows = conn.execute("SELECT user_id, fcm_token FROM user_fcm_tokens").fetchall()
-        for row in rows: _fcm_tokens[row["user_id"]] = row["fcm_token"]
+        try:
+            rows = conn.execute("SELECT user_id, fcm_token FROM user_fcm_tokens").fetchall()
+            for row in rows: _fcm_tokens[row["user_id"]] = row["fcm_token"]
+        except: pass
         conn.close()
     except: pass
 
 def _send_fcm(user_id, title, body):
     token = _fcm_tokens.get(user_id)
     if not token: return
+    key_file = '/opt/nexus/fcm_server_key.txt'
+    if not _os.path.exists(key_file): return
+    server_key = open(key_file).read().strip()
+    if not server_key: return
     try:
-        key_file = '/opt/nexus/fcm_server_key.txt'
-        if not _os.path.exists(key_file): return
-        server_key = open(key_file).read().strip()
-        _requests.post("https://fcm.googleapis.com/fcm/send",
-            json={"to": token, "notification": {"title": title, "body": body},
-                  "data": {"title": title, "body": body},
-                  "priority": "high"},
+        import requests as _req
+        # DATA-ONLY push — onMessageReceived вызывается даже в фоне
+        _req.post("https://fcm.googleapis.com/fcm/send",
+            json={
+                "to": token,
+                "data": {"title": title, "body": body},
+                "priority": "high",
+                "android": {"priority": "high", "direct_boot_ok": True}
+            },
             headers={"Authorization": "key=" + server_key,
-                     "Content-Type": "application/json"}, timeout=10)
+                     "Content-Type": "application/json"},
+            timeout=10)
     except Exception as e:
         print("[FCM] error:", e)
 
@@ -59,6 +67,10 @@ for line in lines:
 
 c = "\n".join(new_lines)
 
+# Endpoint для регистрации FCM токена + загрузка токенов при старте + вызов _load_fcm_tokens
+# Добавляем вызов _load_fcm_tokens после создания FastAPI app
+c = c.replace("app = FastAPI()", "app = FastAPI()\n_load_fcm_tokens()", 1)
+
 fcm_endpoint = """
 
 @app.post("/api/fcm-token")
@@ -72,6 +84,7 @@ async def register_fcm_token(req: dict, sess=Depends(auth_user)):
         conn.execute("CREATE TABLE IF NOT EXISTS user_fcm_tokens (user_id INTEGER PRIMARY KEY, fcm_token TEXT)")
         conn.execute("INSERT OR REPLACE INTO user_fcm_tokens (user_id, fcm_token) VALUES (?,?)", (uid, token))
         conn.commit(); conn.close()
+        print(f"[FCM] Token registered for user {uid}")
     except Exception as e:
         print("[FCM] DB:", e)
     return {"ok": True}
