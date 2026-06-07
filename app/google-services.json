@@ -9,7 +9,10 @@
       "client_info": {
         "mobilesdk_app_id": "1:822608727855:android:20290a7d9cb24e608f9bda",
         "android_client_info": {
-          "package_name": "com.nexus.app"
+          "package_name": "com.nexus.app",
+          "certificate_hash": [
+            "33a647368b9e05a27d5eceb121a0ce9590d6098c"
+          ]
         }
       },
       "oauth_client": [],
