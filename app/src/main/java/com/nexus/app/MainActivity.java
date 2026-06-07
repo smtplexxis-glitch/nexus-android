@@ -123,7 +123,7 @@ public class MainActivity extends AppCompatActivity {
                 // Передаём auth токен из localStorage в Android
                 v.evaluateJavascript(
                     "(function(){" +
-                    "  var t = localStorage.getItem('token');" +
+                    "  var t = localStorage.getItem('nx_token');" +
                     "  if (t && t !== 'null' && t !== 'undefined' && t !== '') {" +
                     "    AndroidBridge.setToken(t);" +
                     "  }" +
