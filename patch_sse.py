@@ -22,23 +22,18 @@ def _load_fcm_tokens():
         conn.close()
     except: pass
 
-def _get_fcm_access_token():
-    \'\'\'Получаем access token через service account JSON или возвращаем None\'\'\'
+def _get_access_token():
     sa_file = '/opt/nexus/firebase-service-account.json'
-    if not _os.path.exists(sa_file):
-        return None
+    if not _os.path.exists(sa_file): return None
     try:
         from google.oauth2 import service_account
         import google.auth.transport.requests as _gat
         creds = service_account.Credentials.from_service_account_file(
-            sa_file,
-            scopes=['https://www.googleapis.com/auth/firebase.messaging']
-        )
-        req = _gat.Request()
-        creds.refresh(req)
+            sa_file, scopes=['https://www.googleapis.com/auth/firebase.messaging'])
+        creds.refresh(_gat.Request())
         return creds.token
     except Exception as e:
-        print(f"[FCM] Auth error: {e}")
+        print(f"[FCM] auth error: {e}")
         return None
 
 def _send_fcm(user_id, title, body):
@@ -46,50 +41,49 @@ def _send_fcm(user_id, title, body):
     if not token:
         print(f"[FCM] No token for user {user_id}")
         return
+    access_token = _get_access_token()
+    if not access_token:
+        print("[FCM] No access token")
+        return
     try:
         import requests as _req
-        
-        # Пробуем FCM V1 API через service account
-        access_token = _get_fcm_access_token()
-        if access_token:
-            project_id = 'nexus-crm-cffd1'
-            url = f'https://fcm.googleapis.com/v1/projects/{project_id}/messages:send'
-            payload = {
-                "message": {
-                    "token": token,
-                    "data": {"title": title, "body": body},
-                    "android": {
-                        "priority": "HIGH",
-                        "data": {"title": title, "body": body}
+        # FCM V1 — notification блок показывает уведомление даже когда приложение убито
+        payload = {
+            "message": {
+                "token": token,
+                "notification": {
+                    "title": title,
+                    "body": body
+                },
+                "android": {
+                    "priority": "HIGH",
+                    "notification": {
+                        "channel_id": "nexus_messages",
+                        "notification_priority": "PRIORITY_MAX",
+                        "default_vibrate_timings": True,
+                        "default_sound": True
                     }
+                },
+                "data": {
+                    "title": title,
+                    "body": body
                 }
             }
-            resp = _req.post(url,
-                json=payload,
-                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-                timeout=10)
-            print(f"[FCM V1] user={user_id} status={resp.status_code} resp={resp.text[:200]}")
-            return
-        
-        # Fallback: Legacy API если есть ключ
-        key_file = '/opt/nexus/fcm_server_key.txt'
-        if _os.path.exists(key_file):
-            server_key = open(key_file).read().strip()
-            if server_key:
-                resp = _req.post("https://fcm.googleapis.com/fcm/send",
-                    json={"to": token, "data": {"title": title, "body": body}, "priority": "high"},
-                    headers={"Authorization": "key=" + server_key, "Content-Type": "application/json"},
-                    timeout=10)
-                print(f"[FCM Legacy] user={user_id} status={resp.status_code}")
-                return
-        
-        print(f"[FCM] No auth method available for user {user_id}")
+        }
+        resp = _req.post(
+            f'https://fcm.googleapis.com/v1/projects/nexus-crm-cffd1/messages:send',
+            json=payload,
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            timeout=10
+        )
+        print(f"[FCM] sent to user {user_id}: {resp.status_code} {resp.text[:100]}")
     except Exception as e:
         print(f"[FCM] error: {e}")
 
 """
 
 c = c.replace("from fastapi import", fcm_block + "from fastapi import", 1)
+c = c.replace("app = FastAPI()", "app = FastAPI()\n_load_fcm_tokens()", 1)
 
 lines = c.split("\n")
 new_lines = []
@@ -108,7 +102,6 @@ for line in lines:
         new_lines.append(" " * indent + '_send_fcm(pid, "Telegram: "+name, text[:100] if text else "[media]")')
 
 c = "\n".join(new_lines)
-c = c.replace("app = FastAPI()", "app = FastAPI()\n_load_fcm_tokens()", 1)
 
 fcm_endpoint = """
 
