@@ -2,8 +2,6 @@ package com.nexus.app;
 
 import android.app.*;
 import android.content.*;
-import android.content.pm.PackageManager;
-import android.os.Build;
 import androidx.core.app.NotificationCompat;
 import com.google.firebase.messaging.FirebaseMessagingService;
 import com.google.firebase.messaging.RemoteMessage;
@@ -27,18 +25,16 @@ public class MyFirebaseService extends FirebaseMessagingService {
             if (msg.getNotification().getTitle() != null) title = msg.getNotification().getTitle();
             if (msg.getNotification().getBody()  != null) body  = msg.getNotification().getBody();
         }
+        android.util.Log.d("FCM", "Message received: " + title);
         showNotif(title, body);
     }
 
     @Override
     public void onNewToken(String fcmToken) {
-        // Сохраняем токен
+        android.util.Log.d("FCM", "New FCM token: " + fcmToken.substring(0, 20));
         getSharedPreferences(PREFS, MODE_PRIVATE)
             .edit().putString("fcm_token", fcmToken).apply();
-        android.util.Log.d("FCM", "New token: " + fcmToken.substring(0, 20));
-        // Сразу регистрируем на сервере если есть auth токен
-        String authToken = getSharedPreferences(PREFS, MODE_PRIVATE)
-            .getString("token", null);
+        String authToken = getSharedPreferences(PREFS, MODE_PRIVATE).getString("token", null);
         if (authToken != null && !authToken.isEmpty()) {
             sendTokenToServer(authToken, fcmToken);
         }
@@ -47,6 +43,7 @@ public class MyFirebaseService extends FirebaseMessagingService {
     public static void sendTokenToServer(String authToken, String fcmToken) {
         new Thread(() -> {
             try {
+                android.util.Log.d("FCM", "Sending token to server...");
                 HttpURLConnection c = (HttpURLConnection)
                     new URL(API + "/api/fcm-token").openConnection();
                 c.setRequestMethod("POST");
@@ -55,13 +52,13 @@ public class MyFirebaseService extends FirebaseMessagingService {
                 c.setDoOutput(true);
                 c.setConnectTimeout(10000);
                 c.setReadTimeout(10000);
-                String body = "{\"token\":\"" + fcmToken + "\"}";
-                c.getOutputStream().write(body.getBytes("UTF-8"));
+                c.getOutputStream().write(
+                    ("{\"token\":\"" + fcmToken + "\"}").getBytes("UTF-8"));
                 int code = c.getResponseCode();
-                android.util.Log.d("FCM", "Server register: " + code);
+                android.util.Log.d("FCM", "Server response: " + code);
                 c.disconnect();
             } catch (Exception e) {
-                android.util.Log.e("FCM", "Register error: " + e.getMessage());
+                android.util.Log.e("FCM", "Error: " + e.getMessage());
             }
         }).start();
     }
@@ -87,6 +84,7 @@ public class MyFirebaseService extends FirebaseMessagingService {
         NotificationChannel ch = new NotificationChannel(
             CHANNEL, "Сообщения NEXUS", NotificationManager.IMPORTANCE_HIGH);
         ch.enableVibration(true);
+        ch.setBypassDnd(true);
         ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
             .createNotificationChannel(ch);
     }
