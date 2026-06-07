@@ -9,16 +9,13 @@
       "client_info": {
         "mobilesdk_app_id": "1:822608727855:android:20290a7d9cb24e608f9bda",
         "android_client_info": {
-          "package_name": "com.nexus.app",
-          "certificate_hash": [
-            "33a64736 8b9e05a2 7d5eceb1 21a0ce95 90d6098c"
-          ]
+          "package_name": "com.nexus.app"
         }
       },
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyCx80ru6-RXeTi3GvqkFsMVyMf-vpgIoVw"
+          "current_key": "AIzaSyBxu0zmimNn_JEHEF6_1cxwOmNB_XRQOX0"
         }
       ],
       "services": {
