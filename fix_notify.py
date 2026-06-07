@@ -1,24 +1,31 @@
 
-c = open('/var/www/nexus/app/index.html').read()
+import subprocess, json
 
-old = "TOKEN=d.token; localStorage.setItem('nx_token',TOKEN);"
-new = "TOKEN=d.token; localStorage.setItem('nx_token',TOKEN); try{if(window.AndroidBridge)AndroidBridge.setToken(TOKEN);}catch(e){}"
+# Логинимся локально
+r = subprocess.run(['curl','-s','-X','POST','http://127.0.0.1:8000/api/auth/login',
+    '-H','Content-Type: application/json',
+    '-d','{"username":"exclauto","password":"123456"}'],
+    capture_output=True, text=True)
+print("Login response:", r.stdout[:200])
 
-if old in c:
-    c = c.replace(old, new, 1)
-    open('/var/www/nexus/app/index.html','w').write(c)
-    print('PATCHED OK - AndroidBridge.setToken called on login')
-else:
-    # Попробуем найти вариант с пробелами
-    import re
-    m = re.search(r"TOKEN=d\.token;\s*localStorage\.setItem\('nx_token',TOKEN\);", c)
-    if m:
-        old2 = m.group(0)
-        new2 = old2 + " try{if(window.AndroidBridge)AndroidBridge.setToken(TOKEN);}catch(e){}"
-        c = c.replace(old2, new2, 1)
-        open('/var/www/nexus/app/index.html','w').write(c)
-        print('PATCHED OK v2')
-    else:
-        print('NOT FOUND, searching...')
-        idx = c.find('nx_token')
-        print(repr(c[idx-50:idx+100]))
+try:
+    d = json.loads(r.stdout)
+    auth_token = d.get('token') or d.get('access_token')
+    print("Auth token:", auth_token[:30] if auth_token else "NONE")
+    
+    if auth_token:
+        # Регистрируем тестовый FCM токен
+        r2 = subprocess.run(['curl','-s','-X','POST','http://127.0.0.1:8000/api/fcm-token',
+            '-H','Content-Type: application/json',
+            '-H',f'Authorization: Bearer {auth_token}',
+            '-d','{"token":"test_token_12345"}'],
+            capture_output=True, text=True)
+        print("FCM register:", r2.stdout)
+        
+        # Проверяем БД
+        r3 = subprocess.run(['sqlite3','/opt/nexus/nexus.db',
+            'SELECT user_id, fcm_token FROM user_fcm_tokens;'],
+            capture_output=True, text=True)
+        print("DB:", r3.stdout)
+except Exception as e:
+    print("Error:", e)
