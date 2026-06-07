@@ -33,13 +33,19 @@ public class MainActivity extends AppCompatActivity {
         progressBar = findViewById(R.id.progress_bar);
         createChannel();
         setupWebView(savedInstanceState);
-        // Получаем FCM токен
+
+        // Получаем FCM токен и сразу регистрируем на сервере
         FirebaseMessaging.getInstance().getToken().addOnCompleteListener(task -> {
-            if (task.isSuccessful() && task.getResult() != null) {
-                String token = task.getResult();
-                getSharedPreferences(PREFS, MODE_PRIVATE)
-                    .edit().putString("fcm_token", token).apply();
-                android.util.Log.d("FCM", "Token: " + token.substring(0, 20) + "...");
+            if (!task.isSuccessful() || task.getResult() == null) return;
+            String fcmToken = task.getResult();
+            getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit().putString("fcm_token", fcmToken).apply();
+            android.util.Log.d("FCM", "Token: " + fcmToken.substring(0, 20));
+            // Регистрируем если уже есть auth токен
+            String authToken = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString("token", null);
+            if (authToken != null && !authToken.isEmpty()) {
+                MyFirebaseService.sendTokenToServer(authToken, fcmToken);
             }
         });
     }
@@ -82,25 +88,22 @@ public class MainActivity extends AppCompatActivity {
         ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
 
         webView.addJavascriptInterface(new Object() {
-            // Страница вызывает это когда получает auth токен
             @JavascriptInterface
-            public void setToken(String token) {
-                if (token == null || token.isEmpty()) return;
+            public void setToken(String authToken) {
+                if (authToken == null || authToken.isEmpty()) return;
                 SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
-                p.edit().putString("token", token).apply();
-                // Регистрируем FCM токен сразу
+                p.edit().putString("token", authToken).apply();
+                // Регистрируем FCM токен на сервере
                 String fcmToken = p.getString("fcm_token", null);
                 if (fcmToken != null && !fcmToken.isEmpty()) {
-                    registerFcmToken(token, fcmToken);
+                    MyFirebaseService.sendTokenToServer(authToken, fcmToken);
                 }
             }
-            // Страница может запросить FCM токен
             @JavascriptInterface
             public String getFcmToken() {
                 return getSharedPreferences(PREFS, MODE_PRIVATE)
                     .getString("fcm_token", "");
             }
-            // Прямой показ уведомления из JS (когда приложение открыто)
             @JavascriptInterface
             public void show(String title, String body) {
                 runOnUiThread(() -> showDirectNotif(title, body));
@@ -120,7 +123,6 @@ public class MainActivity extends AppCompatActivity {
             }
             @Override public void onPageFinished(WebView v, String url) {
                 progressBar.setVisibility(View.GONE);
-                // Передаём auth токен из localStorage в Android
                 v.evaluateJavascript(
                     "(function(){" +
                     "  var t = localStorage.getItem('nx_token');" +
@@ -149,28 +151,6 @@ public class MainActivity extends AppCompatActivity {
 
         if (savedState != null) webView.restoreState(savedState);
         else webView.loadUrl(APP_URL);
-    }
-
-    private void registerFcmToken(String authToken, String fcmToken) {
-        new Thread(() -> {
-            try {
-                java.net.HttpURLConnection c = (java.net.HttpURLConnection)
-                    new java.net.URL("http://186.246.46.119/api/fcm-token").openConnection();
-                c.setRequestMethod("POST");
-                c.setRequestProperty("Authorization", "Bearer " + authToken);
-                c.setRequestProperty("Content-Type", "application/json");
-                c.setDoOutput(true);
-                c.setConnectTimeout(10000);
-                c.setReadTimeout(10000);
-                String body = "{\"token\":\"" + fcmToken + "\"}";
-                c.getOutputStream().write(body.getBytes("UTF-8"));
-                int code = c.getResponseCode();
-                android.util.Log.d("FCM", "Register result: " + code);
-                c.disconnect();
-            } catch (Exception e) {
-                android.util.Log.e("FCM", "Register error: " + e.getMessage());
-            }
-        }).start();
     }
 
     private void showDirectNotif(String title, String body) {
