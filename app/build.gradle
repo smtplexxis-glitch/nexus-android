@@ -1,6 +1,5 @@
 plugins {
     id 'com.android.application'
-    id 'com.google.gms.google-services'
 }
 android {
     namespace 'com.nexus.app'
@@ -9,8 +8,8 @@ android {
         applicationId "com.nexus.app"
         minSdk 30
         targetSdk 34
-        versionCode 20
-        versionName "3.0"
+        versionCode 21
+        versionName "3.1"
     }
     signingConfigs {
         release {
@@ -33,6 +32,4 @@ android {
 }
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation platform('com.google.firebase:firebase-bom:32.7.0')
-    implementation 'com.google.firebase:firebase-messaging'
 }
