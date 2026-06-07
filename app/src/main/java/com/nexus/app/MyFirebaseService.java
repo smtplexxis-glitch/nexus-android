@@ -7,6 +7,7 @@ import android.os.Build;
 import androidx.core.app.NotificationCompat;
 import com.google.firebase.messaging.FirebaseMessagingService;
 import com.google.firebase.messaging.RemoteMessage;
+import java.util.Map;
 
 public class MyFirebaseService extends FirebaseMessagingService {
 
@@ -15,23 +16,25 @@ public class MyFirebaseService extends FirebaseMessagingService {
     @Override
     public void onMessageReceived(RemoteMessage msg) {
         super.onMessageReceived(msg);
-        String title = "Новое сообщение";
-        String body  = "Откройте NEXUS";
+
+        // Читаем из data (data-only push работает в фоне)
+        Map<String, String> data = msg.getData();
+        String title = data.containsKey("title") ? data.get("title") : "Новое сообщение";
+        String body  = data.containsKey("body")  ? data.get("body")  : "Откройте NEXUS";
+
+        // Fallback на notification payload если есть
         if (msg.getNotification() != null) {
             if (msg.getNotification().getTitle() != null) title = msg.getNotification().getTitle();
             if (msg.getNotification().getBody()  != null) body  = msg.getNotification().getBody();
         }
-        if (msg.getData().containsKey("title")) title = msg.getData().get("title");
-        if (msg.getData().containsKey("body"))  body  = msg.getData().get("body");
+
         showNotif(title, body);
     }
 
     @Override
     public void onNewToken(String token) {
-        // Сохраняем FCM токен
         getSharedPreferences("nexus_prefs", MODE_PRIVATE)
             .edit().putString("fcm_token", token).apply();
-        // Отправляем на сервер при следующем открытии приложения
     }
 
     private void showNotif(String title, String body) {
@@ -46,7 +49,8 @@ public class MyFirebaseService extends FirebaseMessagingService {
                     .setSmallIcon(android.R.drawable.ic_dialog_email)
                     .setContentTitle(title)
                     .setContentText(body)
-                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setPriority(NotificationCompat.PRIORITY_MAX)
+                    .setCategory(NotificationCompat.CATEGORY_MESSAGE)
                     .setAutoCancel(true)
                     .setContentIntent(pi)
                     .build());
@@ -56,6 +60,7 @@ public class MyFirebaseService extends FirebaseMessagingService {
         NotificationChannel ch = new NotificationChannel(
             CHANNEL, "Сообщения NEXUS", NotificationManager.IMPORTANCE_HIGH);
         ch.enableVibration(true);
+        ch.setBypassDnd(true);
         ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
             .createNotificationChannel(ch);
     }
