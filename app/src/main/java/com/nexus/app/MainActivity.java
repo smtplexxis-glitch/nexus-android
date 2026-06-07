@@ -14,6 +14,8 @@ import android.widget.ProgressBar;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.NotificationCompat;
 import com.google.firebase.messaging.FirebaseMessaging;
+import java.util.HashMap;
+import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -34,16 +36,14 @@ public class MainActivity extends AppCompatActivity {
         createChannel();
         setupWebView(savedInstanceState);
 
-        // Получаем FCM токен и сразу регистрируем на сервере
         FirebaseMessaging.getInstance().getToken().addOnCompleteListener(task -> {
             if (!task.isSuccessful() || task.getResult() == null) return;
             String fcmToken = task.getResult();
             getSharedPreferences(PREFS, MODE_PRIVATE)
                 .edit().putString("fcm_token", fcmToken).apply();
-            android.util.Log.d("FCM", "Token: " + fcmToken.substring(0, 20));
-            // Регистрируем если уже есть auth токен
-            String authToken = getSharedPreferences(PREFS, MODE_PRIVATE)
-                .getString("token", null);
+            android.util.Log.d("FCM", "Got token: " + fcmToken.substring(0, 20));
+            // Если уже залогинены - регистрируем сразу
+            String authToken = getSharedPreferences(PREFS, MODE_PRIVATE).getString("token", null);
             if (authToken != null && !authToken.isEmpty()) {
                 MyFirebaseService.sendTokenToServer(authToken, fcmToken);
             }
@@ -59,8 +59,7 @@ public class MainActivity extends AppCompatActivity {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
                     != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(
-                    new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, REQ);
+                requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, REQ);
             }
         }
     }
@@ -91,18 +90,20 @@ public class MainActivity extends AppCompatActivity {
             @JavascriptInterface
             public void setToken(String authToken) {
                 if (authToken == null || authToken.isEmpty()) return;
+                android.util.Log.d("FCM", "setToken called: " + authToken.substring(0, 10));
                 SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
                 p.edit().putString("token", authToken).apply();
-                // Регистрируем FCM токен на сервере
                 String fcmToken = p.getString("fcm_token", null);
                 if (fcmToken != null && !fcmToken.isEmpty()) {
+                    android.util.Log.d("FCM", "Sending FCM token to server");
                     MyFirebaseService.sendTokenToServer(authToken, fcmToken);
+                } else {
+                    android.util.Log.d("FCM", "No FCM token yet, will send when available");
                 }
             }
             @JavascriptInterface
             public String getFcmToken() {
-                return getSharedPreferences(PREFS, MODE_PRIVATE)
-                    .getString("fcm_token", "");
+                return getSharedPreferences(PREFS, MODE_PRIVATE).getString("fcm_token", "");
             }
             @JavascriptInterface
             public void show(String title, String body) {
@@ -118,23 +119,41 @@ public class MainActivity extends AppCompatActivity {
         }, "AndroidNotify");
 
         webView.setWebViewClient(new WebViewClient() {
-            @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                // Перехватываем все запросы и добавляем FCM токен через заголовок
+                // Но проще - перехватываем ответ логина
+                return super.shouldInterceptRequest(view, request);
+            }
+
+            @Override
+            public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {
                 progressBar.setVisibility(View.VISIBLE);
             }
-            @Override public void onPageFinished(WebView v, String url) {
+
+            @Override
+            public void onPageFinished(WebView v, String url) {
                 progressBar.setVisibility(View.GONE);
+                // Читаем nx_token из localStorage и передаём в AndroidBridge
                 v.evaluateJavascript(
                     "(function(){" +
                     "  var t = localStorage.getItem('nx_token');" +
                     "  if (t && t !== 'null' && t !== 'undefined' && t !== '') {" +
                     "    AndroidBridge.setToken(t);" +
+                    "    return 'sent:' + t.substring(0,10);" +
                     "  }" +
-                    "})()", null);
+                    "  return 'no_token';" +
+                    "})()",
+                    value -> android.util.Log.d("FCM", "onPageFinished eval: " + value));
             }
-            @Override public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
+
+            @Override
+            public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
                 h.proceed();
             }
-            @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
                 String url = r.getUrl().toString();
                 if (url.startsWith("http://186.246.46.119")) return false;
                 startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
