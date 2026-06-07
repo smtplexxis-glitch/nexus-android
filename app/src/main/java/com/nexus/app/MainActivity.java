@@ -33,10 +33,13 @@ public class MainActivity extends AppCompatActivity {
         progressBar = findViewById(R.id.progress_bar);
         createChannel();
         setupWebView(savedInstanceState);
+        // Получаем FCM токен
         FirebaseMessaging.getInstance().getToken().addOnCompleteListener(task -> {
             if (task.isSuccessful() && task.getResult() != null) {
+                String token = task.getResult();
                 getSharedPreferences(PREFS, MODE_PRIVATE)
-                    .edit().putString("fcm_token", task.getResult()).apply();
+                    .edit().putString("fcm_token", token).apply();
+                android.util.Log.d("FCM", "Token: " + token.substring(0, 20) + "...");
             }
         });
     }
@@ -79,14 +82,25 @@ public class MainActivity extends AppCompatActivity {
         ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
 
         webView.addJavascriptInterface(new Object() {
+            // Страница вызывает это когда получает auth токен
             @JavascriptInterface
             public void setToken(String token) {
                 if (token == null || token.isEmpty()) return;
                 SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
                 p.edit().putString("token", token).apply();
+                // Регистрируем FCM токен сразу
                 String fcmToken = p.getString("fcm_token", null);
-                if (fcmToken != null) registerFcmToken(token, fcmToken);
+                if (fcmToken != null && !fcmToken.isEmpty()) {
+                    registerFcmToken(token, fcmToken);
+                }
             }
+            // Страница может запросить FCM токен
+            @JavascriptInterface
+            public String getFcmToken() {
+                return getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .getString("fcm_token", "");
+            }
+            // Прямой показ уведомления из JS (когда приложение открыто)
             @JavascriptInterface
             public void show(String title, String body) {
                 runOnUiThread(() -> showDirectNotif(title, body));
@@ -106,9 +120,14 @@ public class MainActivity extends AppCompatActivity {
             }
             @Override public void onPageFinished(WebView v, String url) {
                 progressBar.setVisibility(View.GONE);
+                // Передаём auth токен из localStorage в Android
                 v.evaluateJavascript(
-                    "(function(){var t=localStorage.getItem('token');" +
-                    "if(t&&t!='null'&&t!='undefined'&&t!='')AndroidBridge.setToken(t);})()", null);
+                    "(function(){" +
+                    "  var t = localStorage.getItem('token');" +
+                    "  if (t && t !== 'null' && t !== 'undefined' && t !== '') {" +
+                    "    AndroidBridge.setToken(t);" +
+                    "  }" +
+                    "})()", null);
             }
             @Override public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
                 h.proceed();
@@ -141,10 +160,16 @@ public class MainActivity extends AppCompatActivity {
                 c.setRequestProperty("Authorization", "Bearer " + authToken);
                 c.setRequestProperty("Content-Type", "application/json");
                 c.setDoOutput(true);
-                c.getOutputStream().write(("{\"token\":\"" + fcmToken + "\"}").getBytes());
-                c.getResponseCode();
+                c.setConnectTimeout(10000);
+                c.setReadTimeout(10000);
+                String body = "{\"token\":\"" + fcmToken + "\"}";
+                c.getOutputStream().write(body.getBytes("UTF-8"));
+                int code = c.getResponseCode();
+                android.util.Log.d("FCM", "Register result: " + code);
                 c.disconnect();
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                android.util.Log.e("FCM", "Register error: " + e.getMessage());
+            }
         }).start();
     }
 
